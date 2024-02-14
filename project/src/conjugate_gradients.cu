@@ -126,7 +126,7 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
         rr = rr_new;
         if(std::sqrt(rr / bb) < rel_error) { break; }
         axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p, size); // this can be done after beta is calculated
-        printf("[%d] alpha: %.15f, beta: %.15f, rr: %.15f\n", num_iters, alpha, beta, rr);
+        // printf("[%d] alpha: %.15f, beta: %.15f, rr: %.15f\n", num_iters, alpha, beta, rr);
     }
 
     cudaMemcpy(x, d_x, size * sizeof(double), cudaMemcpyDeviceToHost);
