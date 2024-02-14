@@ -21,29 +21,29 @@ __global__ void dot(const double *d_x, const double *d_y, double *d_result, size
 {   
     __shared__ double data[BLOCK_SIZE];
     int i = blockIdx.x * blockDim.x + threadIdx.x;
+    // reset d_result by the first thread of the first block
+    if (i == 0) {
+        *d_result = 0.0;
+    }
+    
     if (i < size)
     {
         data[threadIdx.x] = d_x[i] * d_y[i];
-    }
-    __syncthreads();
-    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1)
-    {
-        if (threadIdx.x < stride)
-        {
-            data[threadIdx.x] += data[threadIdx.x + stride];
-        }
         __syncthreads();
+
+        for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1)
+        {
+            if (threadIdx.x < stride)
+            {
+                data[threadIdx.x] += data[threadIdx.x + stride];
+            }
+            __syncthreads();
+        }
     }
     if (threadIdx.x == 0)
     {
        atomicAdd(d_result, data[0]);
     }
-}
-
-__global__ void dot2(const double *d_x, const double *d_y, double *d_result, size_t size)
-{   
-   // random idea: synchronize over smaller threads by defining tiled_partition(this_thread_block(), stride)
-   // other one: synchronize only between the 2 threads that execute the add
 }
 
 __global__ void gemv(double alpha, const double *d_A, const double *d_x, double beta, double *d_y, size_t numRows, size_t numCols)

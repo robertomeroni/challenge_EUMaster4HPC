@@ -5,6 +5,7 @@
 #include "kernels.cu"
 
 
+
 bool read_matrix_from_file(const char * filename, double ** matrix_out, size_t * num_rows_out, size_t * num_cols_out)
 {
     double * matrix;
@@ -69,47 +70,6 @@ void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE 
 }
 
 
-// // TODO: cuda reduction
-// double dot(const double * x, const double * y, size_t size)
-// {
-//     double result = 0.0;
-//     for(size_t i = 0; i < size; i++)
-//     {
-//         result += x[i] * y[i];
-//     }
-//     return result;
-// }
-
-
-// // TODO: cuda
-// void axpby(double alpha, const double * x, double beta, double * y, size_t size)
-// {
-//     // y = alpha * x + beta * y
-
-//     for(size_t i = 0; i < size; i++)
-//     {
-//         y[i] = alpha * x[i] + beta * y[i];
-//     }
-// }
-
-
-// // TODO: maybe use OpenMP for part of this
-// void gemv(double alpha, const double * A, const double * x, double beta, double * y, size_t num_rows, size_t num_cols)
-// {
-//     // y = alpha * A * x + beta * y;
-//     for(size_t r = 0; r < num_rows; r++)
-//     {
-//         double y_val = 0.0;
-//         for(size_t c = 0; c < num_cols; c++)
-//         {
-//             y_val += alpha * A[r * num_cols + c] * x[c];
-//         }
-//         y[r] = beta * y[r] + y_val;
-//     }
-// }
-
-
-
 void conjugate_gradients(const double * A, const double * b, double * x, size_t size, int max_iters, double rel_error)
 {
     double alpha, beta, bb, rr, rr_new;
@@ -146,8 +106,8 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
 
     initialization <<<numBlocks, numThreads>>> (d_x, d_b, d_r, d_p, size);
     dot <<<numBlocks, numThreads>>> (d_b, d_b, d_bb, size);
-
     cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost);
+    printf("bb: %.15f\n", bb);
     rr = bb;
     // wait for matrix A to be copied to the GPU
     cudaDeviceSynchronize();
@@ -166,6 +126,7 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
         rr = rr_new;
         if(std::sqrt(rr / bb) < rel_error) { break; }
         axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p, size); // this can be done after beta is calculated
+        printf("[%d] alpha: %.15f, beta: %.15f, rr: %.15f\n", num_iters, alpha, beta, rr);
     }
 
     cudaMemcpy(x, d_x, size * sizeof(double), cudaMemcpyDeviceToHost);
