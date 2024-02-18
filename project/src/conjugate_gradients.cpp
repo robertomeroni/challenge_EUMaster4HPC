@@ -2,12 +2,8 @@
 #include <cstdlib>
 #include <cmath>
 #include <time.h>
-#include <cuda.h>
-#include <iostream>
-#include "cublas_v2.h"
-#include "kernels.cu"
-#include "cuda_error_check.h"
 #include "solution_check.h"
+
 
 clock_t start, end;
 double cpu_time_used;
@@ -39,6 +35,8 @@ bool read_matrix_from_file(const char * filename, double ** matrix_out, size_t *
     return true;
 }
 
+
+
 bool write_matrix_to_file(const char * filename, const double * matrix, size_t num_rows, size_t num_cols)
 {
     FILE * file = fopen(filename, "wb");
@@ -57,6 +55,8 @@ bool write_matrix_to_file(const char * filename, const double * matrix, size_t n
     return true;
 }
 
+
+
 void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE * file = stdout)
 {
     fprintf(file, "%zu %zu\n", num_rows, num_cols);
@@ -65,95 +65,88 @@ void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE 
         for(size_t c = 0; c < num_cols; c++)
         {
             double val = matrix[r * num_cols + c];
-            printf("%+6.3f ", val);
+            printf("%+6.10f ", val);
         }
         printf("\n");
     }
 }
 
 
+
+double dot(const double * x, const double * y, size_t size)
+{
+    double result = 0.0;
+    for(size_t i = 0; i < size; i++)
+    {
+        result += x[i] * y[i];
+    }
+    return result;
+}
+
+
+
+void axpby(double alpha, const double * x, double beta, double * y, size_t size)
+{
+    // y = alpha * x + beta * y
+
+    for(size_t i = 0; i < size; i++)
+    {
+        y[i] = alpha * x[i] + beta * y[i];
+    }
+}
+
+
+
+void gemv(double alpha, const double * A, const double * x, double beta, double * y, size_t num_rows, size_t num_cols)
+{
+    // y = alpha * A * x + beta * y;
+
+    for(size_t r = 0; r < num_rows; r++)
+    {
+        double y_val = 0.0;
+        for(size_t c = 0; c < num_cols; c++)
+        {
+            y_val += alpha * A[r * num_cols + c] * x[c];
+        }
+        y[r] = beta * y[r] + y_val;
+    }
+}
+
+
+
 void conjugate_gradients(const double * A, const double * b, double * x, size_t size, int max_iters, double rel_error)
-{   
+{
     double alpha, beta, bb, rr, rr_new;
-    double pAp;
-    const double gemv_alpha = 1.0;
-    const double gemv_beta = 0.0;
-    double * d_A = new double[size * size];
-    double * d_Ap = new double[size];
-    double * d_x = new double[size];
-    double * d_b = new double[size];
-    double * d_r = new double[size];
-    double * d_p = new double[size];
-    double * d_bb = new double;
-    double * d_rr_new = new double;
-    double * d_pAp = new double;
+    double * r = new double[size];
+    double * p = new double[size];
+    double * Ap = new double[size];
     int num_iters;
 
-    int numBlocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-    int numThreads = BLOCK_SIZE;
-    
-    cudaStream_t stream1, stream2;
-    cudaStreamCreate(&stream1);
-    cudaStreamCreate(&stream2);
-
-    cublasHandle_t handle;
-    cublasCreate(&handle);
-
-
-    // memory allocation on the GPU.
-    cudaErrorCheck(cudaMalloc((void**)&d_x, size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_b, size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_r, size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_p, size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_bb, sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_rr_new, sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_A, size * size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_Ap, size * sizeof(double)));
-    cudaErrorCheck(cudaMalloc((void**)&d_pAp, sizeof(double)));
-
-    // memory copy from the CPU to the GPU, copy of matrix A is done in parallel with initialization and dot product.
-    cudaErrorCheck(cudaMemcpyAsync(d_A, A, size * size * sizeof(double), cudaMemcpyHostToDevice, stream1));
-    cudaErrorCheck(cudaMemcpy(d_b, b, size * sizeof(double), cudaMemcpyHostToDevice));
-    
-    dot4 <<<numBlocks, numThreads, 0>>> (d_b, d_b, d_bb, size);
-    initialization <<<numBlocks, numThreads, 0, stream2>>> (d_x, d_b, d_r, d_p, size);
-    cudaErrorCheck(cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost));
-    // wait for matrix A to be copied to the GPU
-    cudaErrorCheck(cudaDeviceSynchronize());
-    rr = bb;
-
-    for(num_iters = 1; num_iters <= max_iters; num_iters++)
+    for(size_t i = 0; i < size; i++)
     {
-        cublasDgemv(handle, CUBLAS_OP_N, size, size, &gemv_alpha, d_A, size, d_p, 1, &gemv_beta, d_Ap, 1);
-        dot4 <<<numBlocks, numThreads>>> (d_p, d_Ap, d_pAp, size);
-        cudaErrorCheck(cudaMemcpy(&pAp, d_pAp, sizeof(double), cudaMemcpyDeviceToHost));
-        alpha = rr / pAp;
-        axpby <<<numBlocks, numThreads>>> (-alpha, d_Ap, 1.0, d_r, size); 
-        cudaStreamSynchronize(stream1); // ensure that axbpy on x from the previous iteration has terminated
-        axpby <<<numBlocks, numThreads, 0, stream1>>> (alpha, d_p, 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
-        dot4 <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
-        cudaErrorCheck(cudaMemcpy(&rr_new, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
-        beta = rr_new / rr;
-        axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p, size); // this can be done after beta is calculated
-        rr = rr_new;
-        if(std::sqrt(rr / bb) < rel_error) { break; }
+        x[i] = 0.0;
+        r[i] = b[i];
+        p[i] = b[i];
     }
 
-    cudaErrorCheck(cudaMemcpyAsync(x, d_x, size * sizeof(double), cudaMemcpyDeviceToHost,stream1));
+    bb = dot(b, b, size);
+    rr = bb;
+    for(num_iters = 1; num_iters <= max_iters; num_iters++)
+    {
+        gemv(1.0, A, p, 0.0, Ap, size, size);
+        alpha = rr / dot(p, Ap, size);
+        axpby(alpha, p, 1.0, x, size);
+        axpby(-alpha, Ap, 1.0, r, size);
+        rr_new = dot(r, r, size);
+        beta = rr_new / rr;
+        rr = rr_new;
+        if(std::sqrt(rr / bb) < rel_error) { break; }
+        axpby(1.0, r, beta, p, size);
+    }
 
-    // cleaning up
-    cudaErrorCheck(cudaFree(d_x));
-    cudaErrorCheck(cudaFree(d_b));
-    cudaErrorCheck(cudaFree(d_r));
-    cudaErrorCheck(cudaFree(d_p));
-    cudaErrorCheck(cudaFree(d_A));
-    cudaErrorCheck(cudaFree(d_Ap));
-    cudaErrorCheck(cudaFree(d_bb));
-    cudaErrorCheck(cudaFree(d_pAp));
-    cudaErrorCheck(cudaFree(d_rr_new));
-    cudaStreamDestroy(stream1);
-    cudaStreamDestroy(stream2);
-    cublasDestroy(handle);
+    delete[] r;
+    delete[] p;
+    delete[] Ap;
 
     if(num_iters <= max_iters)
     {
@@ -255,10 +248,11 @@ int main(int argc, char ** argv)
     printf("Done\n");
     printf("\n");
 
+    
     cpu_time_used = ((double) (end - start)) / CLOCKS_PER_SEC;
     printf("Execution time: %f seconds\n", cpu_time_used);
     printf("\n");
-
+    
     printf("Writing solution to file ...\n");
     bool success_write_sol = write_matrix_to_file(output_file_sol, sol, size, 1);
     if(!success_write_sol)
@@ -270,9 +264,9 @@ int main(int argc, char ** argv)
     printf("\n");
 
     #ifdef APPROX
-    print_approx_solution(sol, size, 1);
+    print_approx_solution(sol, size, 0);
     #endif
-
+    
     delete[] matrix;
     delete[] rhs;
     delete[] sol;
