@@ -1,6 +1,6 @@
 #!/bin/bash -l
 
-#SBATCH --time=00:10:00
+#SBATCH --time=03:00:00
 #SBATCH --account=p200301
 #SBATCH --partition=cpu
 #SBATCH --qos=default
@@ -9,9 +9,10 @@
 
 PROGRAM="random_spd_system"
 IO_FOLDER="io"
-MATRIX="matrix.bin"
-RHS="rhs.bin"
-SIZE=2048
+SIZE=131072
+MATRIX="matrix_${SIZE}.bin"
+RHS="rhs_${SIZE}.bin"
+
 
 # check if the "io" folder exists, and create it if it doesn't
 if [ ! -d "$IO_FOLDER" ]; then
@@ -19,6 +20,8 @@ if [ ! -d "$IO_FOLDER" ]; then
 fi
 
 # loading modules
+module load env/release/2022.1
+module load env/staging/2022.1
 module load OpenBLAS/0.3.20-GCC-11.3.0
 
 # compile 
