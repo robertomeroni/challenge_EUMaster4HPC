@@ -99,7 +99,6 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     cublasHandle_t handle;
     cublasCreate(&handle);
 
-
     // memory allocation on the GPU.
     cudaErrorCheck(cudaMalloc((void**)&d_x, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_b, size * sizeof(double)));
@@ -115,7 +114,7 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     cudaErrorCheck(cudaMemcpyAsync(d_A, A, size * size * sizeof(double), cudaMemcpyHostToDevice, stream1));
     cudaErrorCheck(cudaMemcpy(d_b, b, size * sizeof(double), cudaMemcpyHostToDevice));
     
-    dot4 <<<numBlocks, numThreads, 0>>> (d_b, d_b, d_bb, size);
+    dot <<<numBlocks, numThreads, 0>>> (d_b, d_b, d_bb, size);
     initialization <<<numBlocks, numThreads, 0, stream2>>> (d_x, d_b, d_r, d_p, size);
     cudaErrorCheck(cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost));
     // wait for matrix A to be copied to the GPU
@@ -125,13 +124,13 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     for(num_iters = 1; num_iters <= max_iters; num_iters++)
     {
         cublasDgemv(handle, CUBLAS_OP_N, size, size, &gemv_alpha, d_A, size, d_p, 1, &gemv_beta, d_Ap, 1);
-        dot4 <<<numBlocks, numThreads>>> (d_p, d_Ap, d_pAp, size);
+        dot <<<numBlocks, numThreads>>> (d_p, d_Ap, d_pAp, size);
         cudaErrorCheck(cudaMemcpy(&pAp, d_pAp, sizeof(double), cudaMemcpyDeviceToHost));
         alpha = rr / pAp;
         axpby <<<numBlocks, numThreads>>> (-alpha, d_Ap, 1.0, d_r, size); 
         cudaStreamSynchronize(stream1); // ensure that axbpy on x from the previous iteration has terminated
         axpby <<<numBlocks, numThreads, 0, stream1>>> (alpha, d_p, 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
-        dot4 <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
+        dot <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
         cudaErrorCheck(cudaMemcpy(&rr_new, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
         beta = rr_new / rr;
         axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p, size); // this can be done after beta is calculated
