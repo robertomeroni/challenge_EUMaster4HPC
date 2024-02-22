@@ -45,20 +45,14 @@ __global__ void dot(const double *d_x, const double *d_y, double *d_result, size
 {   
     __shared__ double data[BLOCK_SIZE];
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    thread_block block = this_thread_block();
-
-    // reset d_result by the first thread of the first block
-    if (i == 0) {
-        *d_result = 0.0;
-    }
-    
     int tileSize = BLOCK_SIZE / WARP_SIZE;
+    thread_block block = this_thread_block();
     thread_group g = tiled_partition(block, tileSize);
     int id = g.thread_rank();
 
     // first operation and store in shared memory. 0 if i >= size (out of bounds access).
     data[threadIdx.x] = i < size ? d_x[i] * d_y[i] : 0;
-    g.sync();
+    g.sync(); // for the for loop is only needed to synchronize between threads of the same group
     for (int stride = tileSize / 2; stride > 1; stride >>= 1)
     {   
         if (id < stride)

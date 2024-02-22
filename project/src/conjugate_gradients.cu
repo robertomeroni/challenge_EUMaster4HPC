@@ -128,6 +128,8 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
         cudaErrorCheck(cudaMemcpy(&pAp, d_pAp, sizeof(double), cudaMemcpyDeviceToHost));
         alpha = rr / pAp;
         axpby <<<numBlocks, numThreads>>> (-alpha, d_Ap, 1.0, d_r, size); 
+        cudaMemsetAsync(d_pAp, 0, sizeof(double)); // reset dot product to zero, done in parallel with stream1
+        cudaMemsetAsync(d_rr_new, 0, sizeof(double));
         cudaStreamSynchronize(stream1); // ensure that axbpy on x from the previous iteration has terminated
         axpby <<<numBlocks, numThreads, 0, stream1>>> (alpha, d_p, 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
         dot <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
