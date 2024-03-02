@@ -9,7 +9,7 @@
 #SBATCH --partition=gpu
 #SBATCH --qos=default
 #SBATCH --nodes=5
-#SBATCH --cpus-per-task=2
+
 
 if [ "$#" -ne 1 ]; then
     echo "Usage: 'filename' <size>"
@@ -30,11 +30,11 @@ if [ ! -d "$IO_FOLDER" ]; then
 fi
 
 # loading modules
-module load env/staging/2022.1
-module load CUDA/11.7.0
+module load env/release/2023.1
+module load NCCL/2.18.3-GCCcore-12.3.0-CUDA-12.2.0
 
 # compile 
-nvcc -arch=sm_80 src/${PROGRAM}.cu -o ${PROGRAM} -lcublas
+nvcc -arch=sm_80 src/${PROGRAM}.cu -o ${PROGRAM} -lnccl -lcublas 
 
 # run 
 ./${PROGRAM} ${IO_FOLDER}/${MATRIX} ${IO_FOLDER}/${RHS} ${IO_FOLDER}/${SOL}

@@ -14,9 +14,9 @@ SIZE=$1
 APPROX=$2
 
 if [ "$APPROX" == "APPROX" ]; then
-    nvcc -arch=sm_80 src/conjugate_gradients.cu -o conjugate_gradients -lcublas -DAPPROX
+    nvcc -arch=sm_80 src/conjugate_gradients.cu -o conjugate_gradients -lcublas -lnncl -DAPPROX
 else
-    nvcc -arch=sm_80 src/conjugate_gradients.cu -o conjugate_gradients -lcublas
+    nvcc -arch=sm_80 src/conjugate_gradients.cu -o conjugate_gradients -lcublas -lnncl
 fi
 
-./conjugate_gradients io/matrix_${SIZE}.bin io/rhs_${SIZE}.bin io/sol_${SIZE}.bin
+./conjugate_gradients io/matrix_${SIZE}.bin io/rhs_${SIZE}.bin io/sol_${SIZE}.bin 

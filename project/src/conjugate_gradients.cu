@@ -3,6 +3,7 @@
 #include <cmath>
 #include <time.h>
 #include <cuda.h>
+#include <nccl.h>
 #include <iostream>
 #include "cublas_v2.h"
 #include "kernels.cu"
@@ -70,6 +71,186 @@ void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE 
         printf("\n");
     }
 }
+
+
+void nccl_conjugate_gradients(const double * A, const double * b, double * x, size_t size, int max_iters, double rel_error)
+{   
+    // NCCL initialization
+    const int numGPUs = 4;
+    int gpus[numGPUs] = {0, 1, 2, 3}; 
+    ncclComm_t comms[numGPUs];
+    cudaStream_t stream1[numGPUs];
+    cudaStream_t stream2[numGPUs];
+
+    bool not_divisible = size % numGPUs != 0;
+    size_t num_rows = size / numGPUs + (not_divisible);
+    int unused_rows = num_rows * numGPUs - size;
+
+    double alpha, beta, bb, rr, rr_new;
+    double pAp;
+    const double gemv_alpha = 1.0;
+    const double gemv_beta = 0.0;
+    double **d_p = (double **) malloc(numGPUs * sizeof(double *));
+    double **d_A = (double **) malloc(numGPUs * sizeof(double *));
+    double **d_Ap = (double **) malloc(numGPUs * sizeof(double *));
+    double * d_x;
+    double * d_b;
+    double * d_r;
+    double * d_bb;
+    double * d_rr_new;
+    double * d_pAp;
+    int num_iters;
+
+    int numBlocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int numThreads = BLOCK_SIZE;
+
+    ncclErrorCheck(ncclCommInitAll(comms, numGPUs, gpus));
+
+     // memory allocation on the GPU.
+    cudaErrorCheck(cudaMalloc((void**)&d_x, size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_b, size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_r, size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_bb, sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_rr_new, sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_pAp, sizeof(double)));
+
+    for(int i = 0; i < numGPUs; i++)
+    {   
+        cudaErrorCheck(cudaSetDevice(gpus[i]));
+        cudaErrorCheck(cudaStreamCreate(&stream1[i]));
+        cudaErrorCheck(cudaStreamCreate(&stream2[i]));
+        // memory allocation on the GPU.
+        cudaErrorCheck(cudaMalloc(d_p + i, size * sizeof(double)));
+        cudaErrorCheck(cudaMalloc(d_A + i, num_rows * size * sizeof(double)));
+        cudaErrorCheck(cudaMalloc(d_Ap + i, numGPUs * num_rows * sizeof(double)));
+        // each GPU gets a subset of the matrix A
+        if (i < numGPUs - 1)
+        {
+            cudaErrorCheck(cudaMemcpyAsync(d_A[i], A + i * num_rows * size, num_rows * size * sizeof(double), cudaMemcpyHostToDevice, stream2[i]));
+        }
+        else
+        {
+            cudaErrorCheck(cudaMemcpyAsync(d_A[i], A + i * num_rows * size, (num_rows - unused_rows) * size * sizeof(double), cudaMemcpyHostToDevice, stream2[i]));
+        }
+    }   
+
+    // if the matrix is not divisible by 4, fill the empty rows from last GPU with zeros
+    if (not_divisible)
+    {
+        cudaErrorCheck(cudaMemsetAsync(d_A[numGPUs - 1] + (num_rows - unused_rows) * size, 0, unused_rows * size * sizeof(double), stream1[numGPUs - 1]));
+    }
+    
+    cudaErrorCheck(cudaSetDevice(gpus[0]));
+    cudaErrorCheck(cudaMemcpy(d_b, b, size * sizeof(double), cudaMemcpyHostToDevice));
+
+    dot <<<numBlocks, numThreads>>> (d_b, d_b, d_bb, size);
+    initialization <<<numBlocks, numThreads, 0, stream1[0]>>> (d_x, d_b, d_r, d_p[0], size);
+
+    cudaErrorCheck(cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost));
+    rr = bb;
+
+    cublasHandle_t handle[numGPUs];
+    for(int i = 0; i < numGPUs; i++)
+    {
+        cudaErrorCheck(cudaSetDevice(gpus[i]));
+        cublasErrorCheck(cublasCreate(&handle[i]));
+        cublasErrorCheck(cublasSetStream(handle[i], stream1[i])); // link the cuda stream to the cublas handle
+    }
+
+    // make sure A is copied to all GPUs before starting the main loop
+    for (int i = 0; i < numGPUs; i++)
+    {
+        cudaSetDevice(gpus[i]);
+        cudaStreamSynchronize(stream2[i]);
+    }
+    cudaErrorCheck(cudaSetDevice(gpus[0]));
+
+
+
+    // MAIN LOOP
+    for(num_iters = 1; num_iters <= max_iters; num_iters++)
+    {   
+        // broadcast d_p to all GPUs
+        ncclGroupStart();
+        for(int i = 0; i < numGPUs; i++) 
+        {
+            cudaErrorCheck(cudaSetDevice(gpus[i]));
+            ncclErrorCheck(ncclBroadcast(d_p[0], d_p[i], size, ncclDouble, 0, comms[i], stream1[i]));
+        }
+        ncclGroupEnd();
+
+        // each GPU computes gemv on a subset of the matrix A
+        for (int i = 0; i < numGPUs; i++)
+        {   
+            cudaSetDevice(gpus[i]);
+            cublasErrorCheck(cublasDgemv(handle[i], CUBLAS_OP_T, size, num_rows, &gemv_alpha, d_A[i], size, d_p[i], 1, &gemv_beta, d_Ap[i] + i * num_rows, 1));
+        }
+        
+        // allgather the results of gemv
+        ncclErrorCheck(ncclGroupStart());   
+        for (int i = 0; i < numGPUs; i++)
+        {
+            cudaSetDevice(gpus[i]);
+            ncclErrorCheck(ncclAllGather(d_Ap[i] + i * num_rows, d_Ap[i], num_rows, ncclDouble, comms[i], stream1[i]));
+        }
+        ncclErrorCheck(ncclGroupEnd());
+
+        // synchronize over all GPUs
+        for (int i = 0; i < numGPUs; i++)
+        {
+            cudaSetDevice(gpus[i]);
+            cudaStreamSynchronize(stream1[i]);
+        }
+        cudaErrorCheck(cudaSetDevice(gpus[0]));
+
+        dot <<<numBlocks, numThreads>>> (d_p[0], d_Ap[0], d_pAp, size);
+        cudaErrorCheck(cudaMemcpy(&pAp, d_pAp, sizeof(double), cudaMemcpyDeviceToHost));
+        alpha = rr / pAp;
+        axpby <<<numBlocks, numThreads>>> (-alpha, d_Ap[0], 1.0, d_r, size); 
+        cudaMemsetAsync(d_pAp, 0, sizeof(double)); // reset dot product to zero, done in parallel with stream2
+        cudaMemsetAsync(d_rr_new, 0, sizeof(double));
+        cudaStreamSynchronize(stream2[0]); // ensure that axbpy on x from the previous iteration has terminated
+        axpby <<<numBlocks, numThreads, 0, stream2[0]>>> (alpha, d_p[0], 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
+        dot <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
+        cudaErrorCheck(cudaMemcpy(&rr_new, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
+        beta = rr_new / rr;
+        axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p[0], size); // this can be done after beta is calculated
+        rr = rr_new;
+        if(std::sqrt(rr / bb) < rel_error) { break; }
+    }
+    
+    // copy the solution back to the host
+    cudaErrorCheck(cudaMemcpyAsync(x, d_x, size * sizeof(double), cudaMemcpyDeviceToHost,stream2[0]));
+
+    // cleaning up
+    cudaErrorCheck(cudaFree(d_x));
+    cudaErrorCheck(cudaFree(d_b));
+    cudaErrorCheck(cudaFree(d_r));
+    cudaErrorCheck(cudaFree(d_bb));
+    cudaErrorCheck(cudaFree(d_pAp));
+    cudaErrorCheck(cudaFree(d_rr_new));
+    for(int i = 0; i < numGPUs; i++)
+    {   
+        cudaErrorCheck(cudaFree(d_p[i]));
+        cudaErrorCheck(cudaFree(d_A[i]));
+        cudaErrorCheck(cudaFree(d_Ap[i]));
+        cudaErrorCheck(cudaStreamDestroy(stream1[i]));
+        cudaErrorCheck(cudaStreamDestroy(stream2[i]));
+        ncclErrorCheck(ncclCommDestroy(comms[i]));
+    }
+
+    if(num_iters <= max_iters)
+    {
+        printf("Converged in %d iterations, relative error is %e\n", num_iters, std::sqrt(rr / bb));
+    }
+    else
+    {
+        printf("Did not converge in %d iterations, relative error is %e\n", max_iters, std::sqrt(rr / bb));
+    }
+}
+
+
+
 
 
 void conjugate_gradients(const double * A, const double * b, double * x, size_t size, int max_iters, double rel_error)
@@ -168,8 +349,6 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
 
 
 
-
-
 int main(int argc, char ** argv)
 {
     printf("Usage: ./random_matrix input_file_matrix.bin input_file_rhs.bin output_file_sol.bin max_iters rel_error\n");
@@ -250,7 +429,13 @@ int main(int argc, char ** argv)
     double * sol = new double[size];
 
     start = clock();
-    conjugate_gradients(matrix, rhs, sol, size, max_iters, rel_error);
+
+    // if the matrix is big and divisible by 4, use the implementation with NCCL (multiple GPUs, each with a subset of the matrix A)
+    if (size <= 65536)
+        conjugate_gradients(matrix, rhs, sol, size, max_iters, rel_error);
+    else
+        nccl_conjugate_gradients(matrix, rhs, sol, size, max_iters, rel_error);
+
     end = clock();
 
     printf("Done\n");

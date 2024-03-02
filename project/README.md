@@ -1,18 +1,14 @@
 # Instructions to run the program
 
+For matrixes of size bigger than 65536, the program uses a NCCL implementation (multiple GPUs, communication directly from GPU memory to GPU memory with NVLink 3).
+
 - On your PC (from /project):
 
-To run just the parallel version (you need the cuda-toolkit), use: 
-
-```bash NVCC_conjugategradient_compile_and_run.sh <size>```
-
-To run both the sequential version and the parallel version, save an approximate solution (precision %+6.5f) and compare the results, use:
-
-```bash runAndCompareSolutions.sh <size>```
-
+If you are a normal person (you don't have a PC with 4 GPUs or more), the program will only work for sizes <= 65536 (if your GPU has enough memory).
+To run the program you will need the cuBLAS library and the NCCL library.
 
 - On the MeluXina supercomputer:
 
 ```sbatch submit.sh <size>```
 
-In all cases, ensure that '<size>' corresponds to the dimensions of a matrix located in the 'io' folder.
+Ensure that 'size' corresponds to the dimensions of a matrix located in the 'io' folder.
