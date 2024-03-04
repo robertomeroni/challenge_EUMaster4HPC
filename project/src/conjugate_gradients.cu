@@ -73,6 +73,7 @@ void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE 
 }
 
 
+
 void nccl_conjugate_gradients(const double * A, const double * b, double * x, size_t size, int max_iters, double rel_error)
 {   
     // NCCL initialization
@@ -93,9 +94,11 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
     double **d_p = (double **) malloc(numGPUs * sizeof(double *));
     double **d_A = (double **) malloc(numGPUs * sizeof(double *));
     double **d_Ap = (double **) malloc(numGPUs * sizeof(double *));
+    double * d_diagA[numGPUs];
     double * d_x;
     double * d_b;
     double * d_r;
+    double * d_z;
     double * d_bb;
     double * d_rr_new;
     double * d_pAp;
@@ -110,6 +113,7 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
     cudaErrorCheck(cudaMalloc((void**)&d_x, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_b, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_r, size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_z, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_bb, sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_rr_new, sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_pAp, sizeof(double)));
@@ -123,6 +127,8 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
         cudaErrorCheck(cudaMalloc(d_p + i, size * sizeof(double)));
         cudaErrorCheck(cudaMalloc(d_A + i, num_rows * size * sizeof(double)));
         cudaErrorCheck(cudaMalloc(d_Ap + i, numGPUs * num_rows * sizeof(double)));
+        cudaErrorCheck(cudaMalloc(d_diagA + i, size * sizeof(double)));
+
         // each GPU gets a subset of the matrix A
         if (i < numGPUs - 1)
         {
@@ -144,10 +150,26 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
     cudaErrorCheck(cudaMemcpy(d_b, b, size * sizeof(double), cudaMemcpyHostToDevice));
 
     dot <<<numBlocks, numThreads>>> (d_b, d_b, d_bb, size);
-    initialization <<<numBlocks, numThreads, 0, stream1[0]>>> (d_x, d_b, d_r, d_p[0], size);
-
+    for (int i = 0; i < numGPUs; i++)
+    {
+        cudaSetDevice(gpus[i]);
+        nccl_extract_diagonal <<<numBlocks, numThreads, 0, stream2[i]>>> (d_A[i], d_diagA[i] + i * num_rows, num_rows, size, unused_rows, i, numGPUs);
+    }
+    
+    ncclGroupStart();
+    for(int i = 0; i < numGPUs; i++) 
+    {
+        cudaErrorCheck(cudaSetDevice(gpus[i]));
+        ncclErrorCheck(ncclAllGather(d_diagA[i] + i * num_rows, d_diagA[i], num_rows, ncclDouble, comms[i], stream2[i]));
+    }
+    ncclGroupEnd();
+    cudaSetDevice(gpus[0]);
+    apply_preconditioner <<<numBlocks, numThreads, 0, stream2[0]>>> (d_b, d_z, d_diagA[0], size);
+    dot <<<numBlocks, numThreads, 0, stream2[0]>>> (d_b, d_z, d_rr_new, size);
+    initialization <<<numBlocks, numThreads, 0, stream1[0]>>> (d_x, d_b, d_r, size);
+    cudaErrorCheck(cudaMemcpyAsync(d_p[0], d_z, size * sizeof(double), cudaMemcpyDeviceToDevice, stream2[0]));
+    cudaErrorCheck(cudaMemcpyAsync(&rr, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost,stream2[0]));
     cudaErrorCheck(cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost));
-    rr = bb;
 
     cublasHandle_t handle[numGPUs];
     for(int i = 0; i < numGPUs; i++)
@@ -157,14 +179,12 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
         cublasErrorCheck(cublasSetStream(handle[i], stream1[i])); // link the cuda stream to the cublas handle
     }
 
-    // make sure A is copied to all GPUs before starting the main loop
     for (int i = 0; i < numGPUs; i++)
     {
         cudaSetDevice(gpus[i]);
         cudaStreamSynchronize(stream2[i]);
     }
     cudaErrorCheck(cudaSetDevice(gpus[0]));
-
 
 
     // MAIN LOOP
@@ -211,10 +231,11 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
         cudaMemsetAsync(d_rr_new, 0, sizeof(double));
         cudaStreamSynchronize(stream2[0]); // ensure that axbpy on x from the previous iteration has terminated
         axpby <<<numBlocks, numThreads, 0, stream2[0]>>> (alpha, d_p[0], 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
-        dot <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
+        apply_preconditioner <<<numBlocks, numThreads>>> (d_r, d_z, d_diagA[0], size);
+        dot <<<numBlocks, numThreads>>> (d_r, d_z, d_rr_new, size);
         cudaErrorCheck(cudaMemcpy(&rr_new, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
         beta = rr_new / rr;
-        axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p[0], size); // this can be done after beta is calculated
+        xpby <<<numBlocks, numThreads>>> (d_z, beta, d_p[0], size); // this can be done after beta is calculated
         rr = rr_new;
         if(std::sqrt(rr / bb) < rel_error) { break; }
     }
@@ -229,14 +250,17 @@ void nccl_conjugate_gradients(const double * A, const double * b, double * x, si
     cudaErrorCheck(cudaFree(d_bb));
     cudaErrorCheck(cudaFree(d_pAp));
     cudaErrorCheck(cudaFree(d_rr_new));
+    cudaErrorCheck(cudaFree(d_z));
     for(int i = 0; i < numGPUs; i++)
     {   
         cudaErrorCheck(cudaFree(d_p[i]));
         cudaErrorCheck(cudaFree(d_A[i]));
         cudaErrorCheck(cudaFree(d_Ap[i]));
+        cudaErrorCheck(cudaFree(d_diagA[i]));
         cudaErrorCheck(cudaStreamDestroy(stream1[i]));
         cudaErrorCheck(cudaStreamDestroy(stream2[i]));
         ncclErrorCheck(ncclCommDestroy(comms[i]));
+        cublasErrorCheck(cublasDestroy(handle[i]));
     }
 
     if(num_iters <= max_iters)
@@ -260,11 +284,13 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     const double gemv_alpha = 1.0;
     const double gemv_beta = 0.0;
     double * d_A = new double[size * size];
+    double * d_diagA = new double[size];
     double * d_Ap = new double[size];
     double * d_x = new double[size];
     double * d_b = new double[size];
     double * d_r = new double[size];
     double * d_p = new double[size];
+    double * d_z = new double[size];
     double * d_bb = new double;
     double * d_rr_new = new double;
     double * d_pAp = new double;
@@ -273,9 +299,10 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     int numBlocks = (size + BLOCK_SIZE - 1) / BLOCK_SIZE;
     int numThreads = BLOCK_SIZE;
     
-    cudaStream_t stream1, stream2;
+    cudaStream_t stream1, stream2, stream3;
     cudaStreamCreate(&stream1);
     cudaStreamCreate(&stream2);
+    cudaStreamCreate(&stream3);
 
     cublasHandle_t handle;
     cublasCreate(&handle);
@@ -285,9 +312,11 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     cudaErrorCheck(cudaMalloc((void**)&d_b, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_r, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_p, size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_z, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_bb, sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_rr_new, sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_A, size * size * sizeof(double)));
+    cudaErrorCheck(cudaMalloc((void**)&d_diagA, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_Ap, size * sizeof(double)));
     cudaErrorCheck(cudaMalloc((void**)&d_pAp, sizeof(double)));
 
@@ -295,12 +324,15 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     cudaErrorCheck(cudaMemcpyAsync(d_A, A, size * size * sizeof(double), cudaMemcpyHostToDevice, stream1));
     cudaErrorCheck(cudaMemcpy(d_b, b, size * sizeof(double), cudaMemcpyHostToDevice));
     
-    dot <<<numBlocks, numThreads, 0>>> (d_b, d_b, d_bb, size);
-    initialization <<<numBlocks, numThreads, 0, stream2>>> (d_x, d_b, d_r, d_p, size);
-    cudaErrorCheck(cudaMemcpy(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost));
-    // wait for matrix A to be copied to the GPU
+    dot <<<numBlocks, numThreads>>> (d_b, d_b, d_bb, size);
+    extract_diagonal <<<numBlocks, numThreads, 0, stream1>>> (d_A, d_diagA, size);
+    apply_preconditioner <<<numBlocks, numThreads, 0, stream1>>> (d_b, d_z, d_diagA, size);
+    initialization <<<numBlocks, numThreads, 0, stream2>>> (d_x, d_b, d_r, size);
+    cudaErrorCheck(cudaMemcpyAsync(d_p, d_z, size * sizeof(double), cudaMemcpyDeviceToDevice, stream1));
+    cudaErrorCheck(cudaMemcpyAsync(&bb, d_bb, sizeof(double), cudaMemcpyDeviceToHost,stream3));
+    dot <<<numBlocks, numThreads, 0, stream1>>> (d_b, d_z, d_rr_new, size); 
+    cudaErrorCheck(cudaMemcpy(&rr, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
     cudaErrorCheck(cudaDeviceSynchronize());
-    rr = bb;
 
     for(num_iters = 1; num_iters <= max_iters; num_iters++)
     {
@@ -313,10 +345,11 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
         cudaMemsetAsync(d_rr_new, 0, sizeof(double));
         cudaStreamSynchronize(stream1); // ensure that axbpy on x from the previous iteration has terminated
         axpby <<<numBlocks, numThreads, 0, stream1>>> (alpha, d_p, 1.0, d_x, size); // x is not needed until the next iteration and is only get called by this kernel
-        dot <<<numBlocks, numThreads>>> (d_r, d_r, d_rr_new, size);
+        apply_preconditioner <<<numBlocks, numThreads>>> (d_r, d_z, d_diagA, size);
+        dot <<<numBlocks, numThreads>>> (d_r, d_z, d_rr_new, size);
         cudaErrorCheck(cudaMemcpy(&rr_new, d_rr_new, sizeof(double), cudaMemcpyDeviceToHost));
         beta = rr_new / rr;
-        axpby <<<numBlocks, numThreads>>> (1.0, d_r, beta, d_p, size); // this can be done after beta is calculated
+        xpby <<<numBlocks, numThreads>>> (d_z, beta, d_p, size); // this can be done after beta is calculated
         rr = rr_new;
         if(std::sqrt(rr / bb) < rel_error) { break; }
     }
@@ -328,13 +361,16 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     cudaErrorCheck(cudaFree(d_b));
     cudaErrorCheck(cudaFree(d_r));
     cudaErrorCheck(cudaFree(d_p));
+    cudaErrorCheck(cudaFree(d_z));
     cudaErrorCheck(cudaFree(d_A));
+    cudaErrorCheck(cudaFree(d_diagA));
     cudaErrorCheck(cudaFree(d_Ap));
     cudaErrorCheck(cudaFree(d_bb));
     cudaErrorCheck(cudaFree(d_pAp));
     cudaErrorCheck(cudaFree(d_rr_new));
     cudaStreamDestroy(stream1);
     cudaStreamDestroy(stream2);
+    cudaStreamDestroy(stream3);
     cublasDestroy(handle);
 
     if(num_iters <= max_iters)
@@ -430,7 +466,7 @@ int main(int argc, char ** argv)
 
     start = clock();
 
-    // if the matrix is big and divisible by 4, use the implementation with NCCL (multiple GPUs, each with a subset of the matrix A)
+    // if the matrix is big use the implementation with NCCL (multiple GPUs, each with a subset of the matrix A)
     if (size <= 65536)
         conjugate_gradients(matrix, rhs, sol, size, max_iters, rel_error);
     else

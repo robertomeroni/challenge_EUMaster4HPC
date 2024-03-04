@@ -7,8 +7,68 @@ using namespace cooperative_groups;
 extern const int BLOCK_SIZE = 128;
 const int WARP_SIZE = 32;
 
+
+__global__ void apply_preconditioner(const double* r, double* z, const double* diagA, size_t size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size)
+    {
+        if (diagA[i] != 0) // check to avoid division by zero
+            z[i] = r[i] / diagA[i];
+        else
+            z[i] = r[i]; // fallback in case of zero diagonal element
+    }
+}
+
+__global__ void extract_diagonal(const double* d_A, double* diagA, size_t size)
+{   
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size)
+        diagA[i] = d_A[i * size + i];
+}
+
+__global__ void nccl_extract_diagonal(const double* d_A, double* diagA, size_t num_rows, size_t size, int id)
+{   
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < num_rows)
+        diagA[i] = d_A[i * size + i + id * num_rows];
+}
+
+__global__ void nccl_extract_diagonal(const double* d_A, double* diagA, size_t num_rows, size_t size, size_t unused_rows, int id, size_t numGPUs) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t global_row_index = i + id * num_rows; // calculate global row index in the original matrix
+
+    // adjust for the last GPU which might have fewer rows
+    if (id == numGPUs - 1) {
+        num_rows -= unused_rows;
+    }
+
+    if (i < num_rows) {
+        diagA[i] = d_A[i * size + global_row_index]; 
+    }
+}
+
+__global__ void xpby(double *d_x, double beta, double *d_y, size_t size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size)
+    {
+        d_y[i] = d_x[i] + beta * d_y[i];
+    }
+}
+
 // inizialization of the vectors x, r and p
-__global__ void initialization(double *d_x, double *d_b, double *d_r, double *d_p, size_t size)
+__global__ void initialization(double *d_x, double *d_b, double *d_r, size_t size)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size)
+    {
+        d_x[i] = 0.0;
+        d_r[i] = d_b[i];
+    }
+}
+// inizialization of the vectors x, r and p
+__global__ void initialization2(double *d_x, double *d_b, double *d_r, double *d_p, size_t size)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < size)
