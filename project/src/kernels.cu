@@ -67,17 +67,6 @@ __global__ void initialization(double *d_x, double *d_b, double *d_r, size_t siz
         d_r[i] = d_b[i];
     }
 }
-// inizialization of the vectors x, r and p
-__global__ void initialization2(double *d_x, double *d_b, double *d_r, double *d_p, size_t size)
-{
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < size)
-    {
-        d_x[i] = 0.0;
-        d_r[i] = d_b[i];
-        d_p[i] = d_b[i];
-    }
-}
 
 __global__ void axpby(double alpha, const double *d_x, double beta, double *d_y, size_t size)
 {
@@ -139,6 +128,11 @@ __global__ void dot(const double *d_x, const double *d_y, double *d_result, size
     }
 }
 
+
+// other versions of the dot product that I wrote, but are not used in the final implementation.
+// the used version is the fastest one.
+//
+//
 // __global__ void dot1(const double *d_x, const double *d_y, double *d_result, size_t size)
 // {   
 //     __shared__ double data[BLOCK_SIZE];
@@ -326,20 +320,6 @@ __global__ void dot(const double *d_x, const double *d_y, double *d_result, size
 
 
 
-// __global__ void gemv(double alpha, const double *d_A, const double *d_x, double beta, double *d_y, size_t numRows, size_t numCols)
-// {
-//     // y = alpha * A * x + beta * y;
-//     int i = blockIdx.x * blockDim.x + threadIdx.x;
-//     double y_val = 0.0;
-//     if (i < numRows)
-//     {
-//         for(size_t c = 0; c < numCols; c++)
-//         {
-//             y_val += alpha * d_A[i * numCols + c] * d_x[c];
-//         }
-//         d_y[i] = beta * d_y[i] + y_val;
-//     }
-// }
 
 
 
