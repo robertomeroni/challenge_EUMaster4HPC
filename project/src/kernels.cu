@@ -4,7 +4,7 @@
 #include <cooperative_groups.h>
 
 using namespace cooperative_groups;
-extern const int BLOCK_SIZE = 128;
+extern const int BLOCK_SIZE = 256;
 const int WARP_SIZE = 32;
 
 
