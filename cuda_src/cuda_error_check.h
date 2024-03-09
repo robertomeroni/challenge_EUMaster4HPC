@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
-// #include "nccl.h"
+#include "nccl.h"
 
 #define cudaErrorCheck(call) do { \
     cudaError_t status = call; \
