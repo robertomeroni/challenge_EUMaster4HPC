@@ -8,7 +8,6 @@
 #include "cublas_v2.h"
 #include "kernels.cu"
 #include "cuda_error_check.h"
-#include "solution_check.h"
 
 clock_t start, end;
 double cpu_time_used;
